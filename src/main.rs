@@ -5,12 +5,11 @@ use std::{
 
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use glium::{
-    Display, Surface, Texture2d,
+    Display, DrawParameters, Surface,
     backend::glutin::SimpleWindowBuilder,
     buffer::{Buffer, BufferMode, BufferType},
     glutin::surface::WindowSurface,
     program::ComputeShader,
-    uniforms::{ImageUnitAccess, ImageUnitFormat, MagnifySamplerFilter},
     winit::{
         application::ApplicationHandler,
         dpi::PhysicalSize,
@@ -27,16 +26,23 @@ extern crate glium;
 const PARTICLE_COUNT: usize = 1000;
 const PARTICLE_SIZE: f32 = 0.2;
 
+#[derive(Copy, Clone)]
+struct SphereVertex {
+    position: [f32; 3],
+}
+implement_vertex!(SphereVertex, position);
+
+#[derive(Copy, Clone)]
+struct ParticleData {
+    particle: [f32; 4], // xyz = center, w = radius
+}
+implement_vertex!(ParticleData, particle);
+
 struct State {
     window: Window,
     display: Display<WindowSurface>,
 
-    render_texture: Texture2d,
-    copy_texture: Texture2d,
-
     particle_shader: ComputeShader,
-    ray_shader: ComputeShader,
-    copy_shader: ComputeShader,
 
     particle_buffer: Buffer<[[f32; 4]]>,
     velocity_buffer: Buffer<[[f32; 4]]>,
@@ -50,6 +56,57 @@ struct State {
     keys_pressed: HashSet<KeyCode>,
 }
 
+fn create_sphere_mesh(
+    display: &glium::Display<WindowSurface>,
+    subdivisions: u32,
+) -> (glium::VertexBuffer<SphereVertex>, glium::IndexBuffer<u32>) {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+
+    // Create a simple UV sphere
+    for lat in 0..=subdivisions {
+        let theta = lat as f32 * std::f32::consts::PI / subdivisions as f32;
+        let sin_theta = theta.sin();
+        let cos_theta = theta.cos();
+
+        for lon in 0..=subdivisions {
+            let phi = lon as f32 * 2.0 * std::f32::consts::PI / subdivisions as f32;
+            let sin_phi = phi.sin();
+            let cos_phi = phi.cos();
+
+            vertices.push(SphereVertex {
+                position: [sin_theta * cos_phi, cos_theta, sin_theta * sin_phi],
+            });
+        }
+    }
+
+    // Generate indices
+    for lat in 0..subdivisions {
+        for lon in 0..subdivisions {
+            let first = lat * (subdivisions + 1) + lon;
+            let second = first + subdivisions + 1;
+
+            indices.push(first);
+            indices.push(second);
+            indices.push(first + 1);
+
+            indices.push(second);
+            indices.push(second + 1);
+            indices.push(first + 1);
+        }
+    }
+
+    let vertex_buffer = glium::VertexBuffer::new(display, &vertices).unwrap();
+    let index_buffer = glium::IndexBuffer::new(
+        display,
+        glium::index::PrimitiveType::TrianglesList,
+        &indices,
+    )
+    .unwrap();
+
+    (vertex_buffer, index_buffer)
+}
+
 impl State {
     fn resize(&mut self, width: u32, height: u32) {
         self.display.resize((width, height));
@@ -61,7 +118,7 @@ impl State {
         self.last_update = Instant::now();
 
         let local_z = self.cam_rot * Vec3::Z;
-        let forward = Vec3::new(local_z.x, 0.0, local_z.z).normalize_or_zero();
+        let forward = -Vec3::new(local_z.x, 0.0, local_z.z).normalize_or_zero();
         let right = Vec3::new(local_z.z, 0.0, -local_z.x).normalize_or_zero();
         let up = Vec3::Y;
 
@@ -97,8 +154,7 @@ impl State {
                         &particles,
                         BufferType::ShaderStorageBuffer,
                         BufferMode::Dynamic,
-                    )
-                    .unwrap();
+                    )?;
 
                     let mut velocities = self.velocity_buffer.read()?;
                     for _ in 0..count {
@@ -109,8 +165,7 @@ impl State {
                         &velocities,
                         BufferType::ShaderStorageBuffer,
                         BufferMode::Dynamic,
-                    )
-                    .unwrap();
+                    )?;
                 }
                 _ => {}
             }
@@ -140,57 +195,61 @@ impl State {
             );
         }
 
-        let image_unit = self
-            .render_texture
-            .image_unit(ImageUnitFormat::RGBA8)
-            .unwrap()
-            .set_access(ImageUnitAccess::Write);
+        let mut frame = self.display.draw();
+        frame.clear_color_and_depth((0.0, 0.0, 1.0, 1.0), 1.0);
+        let (vertex_buffer, index_buffer) = create_sphere_mesh(&self.display, 8);
 
-        self.ray_shader.execute(
-            uniform! {
-                uWidth: self.render_texture.width(),
-                uHeight: self.render_texture.height(),
-                uCam: Mat4::from_rotation_translation(
-                    self.cam_rot,
-                    self.cam_pos
-                ).to_cols_array_2d(),
-                Particles: &self.particle_buffer,
-                Velocities: &self.velocity_buffer,
-                uDebug: self.keys_pressed.contains(&KeyCode::KeyF),
-                uTexture: image_unit,
-            },
-            self.render_texture.width().div_ceil(16),
-            self.render_texture.height().div_ceil(16),
-            1,
+        let instance_buffer: glium::VertexBuffer<ParticleData> =
+            glium::VertexBuffer::empty(&self.display, self.particle_buffer.len()).unwrap();
+        instance_buffer.write(
+            self.particle_buffer
+                .read()?
+                .into_iter()
+                .map(|particle| ParticleData { particle })
+                .collect::<Vec<_>>()
+                .as_slice(),
         );
 
-        let render_unit = self
-            .render_texture
-            .image_unit(ImageUnitFormat::RGBA8)
-            .unwrap()
-            .set_access(ImageUnitAccess::Read);
+        let program = glium::Program::from_source(
+            &self.display,
+            include_str!("vert.glsl"),
+            include_str!("frag.glsl"),
+            None,
+        )
+        .unwrap();
 
-        let final_unit = self
-            .copy_texture
-            .image_unit(ImageUnitFormat::RGBA8)
-            .unwrap()
-            .set_access(ImageUnitAccess::Write);
+        let (width, height) = frame.get_dimensions();
 
-        self.copy_shader.execute(
-            uniform! {
-                uTexture: render_unit,
-                destTexture: final_unit,
-            },
-            self.render_texture.width(),
-            self.render_texture.height(),
-            1,
-        );
-
-        let frame = self.display.draw();
-        self.copy_texture
-            .as_surface()
-            .fill(&frame, MagnifySamplerFilter::Nearest);
-        frame.finish().unwrap();
+        frame
+            .draw(
+                (&vertex_buffer, instance_buffer.per_instance().unwrap()),
+                &index_buffer,
+                &program,
+                &uniform! {
+                    projection: Mat4::perspective_rh_gl(
+                        45f32.to_radians(),
+                        width as f32 / height as f32,
+                        0.1,
+                        100.0
+                    ).to_cols_array_2d(),
+                    view: Mat4::from_rotation_translation(
+                        self.cam_rot,
+                        self.cam_pos
+                    ).inverse().to_cols_array_2d(),
+                    uCamPos: self.cam_pos.to_array(),
+                },
+                &DrawParameters {
+                    depth: glium::Depth {
+                        test: glium::draw_parameters::DepthTest::IfLess,
+                        write: true,
+                        ..Default::default()
+                    },
+                    point_size: Some(10.0),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        frame.finish()?;
 
         self.window.request_redraw();
 
@@ -225,14 +284,8 @@ impl ApplicationHandler<State> for App {
             .set_window_builder(self.window_attributes.clone())
             .build(event_loop);
 
-        let render_texture = Texture2d::empty(&display, 1024, 1024).unwrap();
-        let copy_texture = Texture2d::empty(&display, 1024, 1024).unwrap();
-
         let particle_shader =
-            ComputeShader::from_source(&display, include_str!("particles.comp")).unwrap();
-        let ray_shader =
-            ComputeShader::from_source(&display, include_str!("raytracing.comp")).unwrap();
-        let copy_shader = ComputeShader::from_source(&display, include_str!("copy.glsl")).unwrap();
+            ComputeShader::from_source(&display, include_str!("compute.glsl")).unwrap();
 
         window.set_cursor_grab(CursorGrabMode::Confined).unwrap();
         window.set_cursor_visible(false);
@@ -266,15 +319,11 @@ impl ApplicationHandler<State> for App {
         self.state = Some(State {
             window,
             display,
-            render_texture,
-            copy_texture,
             particle_shader,
-            ray_shader,
-            copy_shader,
             particle_buffer,
             velocity_buffer,
-            cam_pos: Vec3::new(5.0, 5.0, -15.0),
-            cam_rot: Quat::from_euler(EulerRot::YXZ, -15f32.to_radians(), 20f32.to_radians(), 0.0),
+            cam_pos: Vec3::new(5.0, 5.0, 15.0),
+            cam_rot: Quat::from_euler(EulerRot::YXZ, 15f32.to_radians(), -20f32.to_radians(), 0.0),
             last_update: Instant::now(),
             fixed_time_accum: Duration::ZERO,
             keys_pressed: HashSet::new(),
@@ -329,8 +378,8 @@ impl ApplicationHandler<State> for App {
             let scale = size.height.max(size.width) as f32;
 
             let (mut yaw, mut pitch, _) = state.cam_rot.to_euler(EulerRot::YXZ);
-            yaw += (delta.0 as f32 * scale * 0.00015).to_radians();
-            pitch += (delta.1 as f32 * scale * 0.00015).to_radians();
+            yaw -= (delta.0 as f32 * scale * 0.00015).to_radians();
+            pitch -= (delta.1 as f32 * scale * 0.00015).to_radians();
             pitch = pitch.clamp(-1.54, 1.54);
 
             state.cam_rot = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
