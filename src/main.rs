@@ -23,20 +23,8 @@ use glium::{
 #[macro_use]
 extern crate glium;
 
-const PARTICLE_COUNT: usize = 1000;
-const PARTICLE_SIZE: f32 = 0.2;
-
-#[derive(Copy, Clone)]
-struct SphereVertex {
-    position: [f32; 3],
-}
-implement_vertex!(SphereVertex, position);
-
-#[derive(Copy, Clone)]
-struct ParticleData {
-    particle: [f32; 4], // xyz = center, w = radius
-}
-implement_vertex!(ParticleData, particle);
+const PARTICLE_COUNT: usize = 15000;
+const PARTICLE_SIZE: f32 = 0.1;
 
 struct State {
     window: Window,
@@ -56,65 +44,19 @@ struct State {
     keys_pressed: HashSet<KeyCode>,
 }
 
-fn create_sphere_mesh(
-    display: &glium::Display<WindowSurface>,
-    subdivisions: u32,
-) -> (glium::VertexBuffer<SphereVertex>, glium::IndexBuffer<u32>) {
-    let mut vertices = Vec::new();
-    let mut indices = Vec::new();
-
-    // Create a simple UV sphere
-    for lat in 0..=subdivisions {
-        let theta = lat as f32 * std::f32::consts::PI / subdivisions as f32;
-        let sin_theta = theta.sin();
-        let cos_theta = theta.cos();
-
-        for lon in 0..=subdivisions {
-            let phi = lon as f32 * 2.0 * std::f32::consts::PI / subdivisions as f32;
-            let sin_phi = phi.sin();
-            let cos_phi = phi.cos();
-
-            vertices.push(SphereVertex {
-                position: [sin_theta * cos_phi, cos_theta, sin_theta * sin_phi],
-            });
-        }
-    }
-
-    // Generate indices
-    for lat in 0..subdivisions {
-        for lon in 0..subdivisions {
-            let first = lat * (subdivisions + 1) + lon;
-            let second = first + subdivisions + 1;
-
-            indices.push(first);
-            indices.push(second);
-            indices.push(first + 1);
-
-            indices.push(second);
-            indices.push(second + 1);
-            indices.push(first + 1);
-        }
-    }
-
-    let vertex_buffer = glium::VertexBuffer::new(display, &vertices).unwrap();
-    let index_buffer = glium::IndexBuffer::new(
-        display,
-        glium::index::PrimitiveType::TrianglesList,
-        &indices,
-    )
-    .unwrap();
-
-    (vertex_buffer, index_buffer)
-}
-
 impl State {
     fn resize(&mut self, width: u32, height: u32) {
         self.display.resize((width, height));
     }
 
     fn update(&mut self) -> anyhow::Result<()> {
-        println!("Rendering {} Particles", self.particle_buffer.len());
         let delta = self.last_update.elapsed().as_secs_f32();
+        println!(
+            "Rendering {} Particles at {:.2} FPS ({:.2} ms/frame)",
+            self.particle_buffer.len(),
+            1.0 / delta,
+            delta * 1000.0
+        );
         self.last_update = Instant::now();
 
         let local_z = self.cam_rot * Vec3::Z;
@@ -197,18 +139,6 @@ impl State {
 
         let mut frame = self.display.draw();
         frame.clear_color_and_depth((0.0, 0.0, 1.0, 1.0), 1.0);
-        let (vertex_buffer, index_buffer) = create_sphere_mesh(&self.display, 8);
-
-        let instance_buffer: glium::VertexBuffer<ParticleData> =
-            glium::VertexBuffer::empty(&self.display, self.particle_buffer.len()).unwrap();
-        instance_buffer.write(
-            self.particle_buffer
-                .read()?
-                .into_iter()
-                .map(|particle| ParticleData { particle })
-                .collect::<Vec<_>>()
-                .as_slice(),
-        );
 
         let program = glium::Program::from_source(
             &self.display,
@@ -222,8 +152,10 @@ impl State {
 
         frame
             .draw(
-                (&vertex_buffer, instance_buffer.per_instance().unwrap()),
-                &index_buffer,
+                glium::vertex::EmptyVertexAttributes {
+                    len: self.particle_buffer.len(),
+                },
+                glium::index::NoIndices(glium::index::PrimitiveType::Points),
                 &program,
                 &uniform! {
                     projection: Mat4::perspective_rh_gl(
@@ -237,6 +169,7 @@ impl State {
                         self.cam_pos
                     ).inverse().to_cols_array_2d(),
                     uCamPos: self.cam_pos.to_array(),
+                    Particles: &self.particle_buffer,
                 },
                 &DrawParameters {
                     depth: glium::Depth {
@@ -244,7 +177,7 @@ impl State {
                         write: true,
                         ..Default::default()
                     },
-                    point_size: Some(10.0),
+                    point_size: Some(5.0),
                     ..Default::default()
                 },
             )
@@ -322,7 +255,7 @@ impl ApplicationHandler<State> for App {
             particle_shader,
             particle_buffer,
             velocity_buffer,
-            cam_pos: Vec3::new(5.0, 5.0, 15.0),
+            cam_pos: Vec3::new(5.0, 5.0, 5.0),
             cam_rot: Quat::from_euler(EulerRot::YXZ, 15f32.to_radians(), -20f32.to_radians(), 0.0),
             last_update: Instant::now(),
             fixed_time_accum: Duration::ZERO,

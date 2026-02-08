@@ -1,4 +1,4 @@
-#version 430
+#version 460
 
 layout(local_size_x = 1024) in;
 
@@ -16,9 +16,9 @@ uniform mat4 uCam;
 const float HALF_EXTENT = 5.0;
 const vec3 CENTER = vec3(0.0, 0.0, 0.0);
 const vec3 GRAVITY = vec3(0.0, -9.81, 0.0);
-const float RESTITUTION = 0.04;
+const float RESTITUTION = 0.5;
 const float FORCE_STRENGTH = 30.0;
-const float FRICTION = 0.96;
+const float FRICTION = 0.98;
 const float DELTA = 1.0 / 60.0;
 
 void main() {
@@ -39,15 +39,15 @@ void main() {
 
         if (pos[axis] < minB) {
             pos[axis] = minB;
-            vel[axis] = -vel[axis] * (1.0 + RESTITUTION);
+            vel[axis] = -vel[axis] * RESTITUTION;
         } else if (pos[axis] > maxB) {
             pos[axis] = maxB;
-            vel[axis] = -vel[axis] * (1.0 + RESTITUTION);
+            vel[axis] = -vel[axis] * RESTITUTION;
         }
     }
 
     if (uForce) {
-        vec3 to_center = CENTER - pos + normalize(uCam[2].xyz) * 50.0;
+        vec3 to_center = CENTER - pos - normalize(uCam[2].xyz) * 50.0;
         vel += normalize(to_center) * FORCE_STRENGTH * DELTA;
     }
 
